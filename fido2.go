@@ -4,11 +4,16 @@ package libfido2
 #include <fido.h>
 #include <fido/bio.h>
 #include <fido/credman.h>
+#include <fido/es256.h>
+#include <openssl/ec.h>
 #include <stdlib.h>
 */
 import "C"
 import (
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -746,6 +751,83 @@ func (d *Device) Assertion(
 	}
 
 	return assertion, nil
+}
+
+func VerifyAssertion(
+	typ CredentialType,
+	rp RelyingParty,
+	clientDataHash []byte,
+	authDataCBOR []byte,
+	sig []byte,
+	opts *AssertionOpts,
+	publicKey crypto.PublicKey) error {
+
+	switch typ {
+	case ES256:
+		if _, ok := publicKey.(ecdsa.PublicKey); !ok {
+			return errors.Errorf("public key is not an EC type")
+		}
+	case EDDSA:
+		// TODO: Implement curve type later
+		return errors.Errorf("curve eddsa not implemented")
+
+	case RS256:
+		if _, ok := publicKey.(rsa.PublicKey); !ok {
+			return errors.Errorf("public key is not an RSA type")
+		}
+	default:
+		return errors.Errorf("unknown credential type %d", typ)
+	}
+
+	cAssert := C.fido_assert_new()
+	defer C.fido_assert_free(&cAssert)
+
+	if cErr := C.fido_assert_set_rp(cAssert, C.CString(rp.ID)); cErr != C.FIDO_OK {
+		return errors.Wrap(errFromCode(cErr), "failed to set assertion RP ID")
+	}
+
+	if cErr := C.fido_assert_set_clientdata_hash(cAssert, cBytes(clientDataHash), cLen(clientDataHash)); cErr != C.FIDO_OK {
+		return errors.Wrap(errFromCode(cErr), "failed to set assertion client data hash")
+	}
+
+	if exts := extensionsInt(opts.Extensions); exts > 0 {
+		if cErr := C.fido_assert_set_extensions(cAssert, C.int(exts)); cErr != C.FIDO_OK {
+			return errors.Wrap(errFromCode(cErr), "failed to set extension")
+		}
+	}
+
+	cUV, err := cOpt(opts.UV)
+	if err != nil {
+		return err
+	}
+
+	if cErr := C.fido_assert_set_uv(cAssert, cUV); cErr != C.FIDO_OK {
+		return errors.Wrap(errFromCode(cErr), "failed to set uv")
+	}
+
+	cUP, err := cOpt(opts.UP)
+	if err != nil {
+		return err
+	}
+
+	if cErr := C.fido_assert_set_up(cAssert, cUP); cErr != C.FIDO_OK {
+		return errors.Wrap(errFromCode(cErr), "failed to set assertion up")
+	}
+
+	if cErr := C.fido_assert_set_sig(cAssert, 0, cBytes(sig), cLen(sig)); cErr != C.FIDO_OK {
+		return errors.Wrap(errFromCode(cErr), "failed to set assertion signature")
+	}
+
+	if typ == ES256 {
+		cPk := C.es256_pk_new()
+		defer C.es256_pk_free(&cPk)
+
+		if cErr := C.fido_assert_verify(cAssert, 0, C.int(typ), unsafe.Pointer(cPk)); cErr != C.FIDO_OK {
+			return errors.Wrap(errFromCode(cErr), "failed to verify assertion")
+		}
+	}
+
+	return nil
 }
 
 // CredentialsInfo ...
